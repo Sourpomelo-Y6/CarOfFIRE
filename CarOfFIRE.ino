@@ -17,8 +17,6 @@
 #include <WiFiClient.h>
 #include <WiFiAP.h>
 
-
-
 #define MPU6050_ADDR 0x68
 #define MPU6050_AX  0x3B
 #define MPU6050_AY  0x3D
@@ -45,8 +43,11 @@ int16_t speed_input0, speed_input1;
 int16_t pwm_out0, pwm_out1;
 
 // Set these to your desired credentials.
-const char * ssid = "your-ssid";
-const char * password = "your-password";
+//const char * ssid = "your-ssid";
+//const char * password = "your-password";
+const char * ssid = "M5StackFIRE";
+const char * password = "lets5ev9";
+
 
 //IP address to send UDP data to:
 // either use the ip address of the server or 
@@ -89,6 +90,10 @@ void setup() {
   M5.Lcd.println();
   M5.Lcd.println("Configuring access point...");
 
+  // delete old config
+  WiFi.disconnect(true);
+  delay(500);
+  
   WiFi.softAP(ssid, password);
   IPAddress myIP = WiFi.softAPIP();
   Serial.print("AP IP address: ");
@@ -96,7 +101,7 @@ void setup() {
   M5.Lcd.print("AP IP address: ");
   M5.Lcd.println(myIP);
 
-  WiFi.config(myIP, WiFi.gatewayIP(), WiFi.subnetMask());
+  //WiFi.config(myIP, WiFi.gatewayIP(), WiFi.subnetMask());
   UDP.begin(80);
 
   Serial.println("UDP started");
@@ -128,15 +133,15 @@ void loop() {
     UDP.beginPacket(udpAddress,udpPort);
     //udp.printf("Seconds since boot: %u", millis()/1000);
 
-    UDP.print(AccX);UDP.print(",");
-    UDP.print(AccY);UDP.print(",");
-    UDP.print(AccZ);UDP.print(",");
-    UDP.print(GyroX);UDP.print(",");
-    UDP.print(GyroY);UDP.print(",");
-    UDP.print(GyroZ);UDP.print(",");
-    UDP.print(Temp);UDP.print(",");
-    UDP.print(speed_input0);UDP.print(",");
-    UDP.print(speed_input1);
+    UDP.write(AccX);//UDP.print(",");
+    UDP.write(AccY);//UDP.print(",");
+    UDP.write(AccZ);//UDP.print(",");
+    UDP.write(GyroX);//UDP.print(",");
+    UDP.write(GyroY);//UDP.print(",");
+    UDP.write(GyroZ);//UDP.print(",");
+    UDP.write(Temp);//UDP.print(",");
+    UDP.write(speed_input0);//UDP.print(",");
+    UDP.write(speed_input1);
     
     UDP.endPacket();
   }
