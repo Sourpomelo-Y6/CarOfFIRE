@@ -12,10 +12,18 @@
 //https://ameblo.jp/ruru12245/entry-12404525191.html
 
 #include <M5Stack.h>
+
+#include <ros.h>
+#include <ros/time.h>
+#include <tf/tf.h>
+#include <tf/transform_broadcaster.h>
+#include <geometry_msgs/Twist.h>
+#include <std_msgs/String.h>
+
 #include <Wire.h>
 #include <WiFi.h>
-#include <WiFiClient.h>
-#include <WiFiAP.h>
+//#include <WiFiClient.h>
+//#include <WiFiAP.h>
 
 #define MPU6050_ADDR 0x68
 #define MPU6050_AX  0x3B
@@ -25,7 +33,6 @@
 #define MPU6050_GX  0x43
 #define MPU6050_GY  0x45
 #define MPU6050_GZ  0x47
-
 
 #define MOTOR_RPM           150
 #define MAX_PWM             255
@@ -48,17 +55,70 @@ int16_t pwm_out0, pwm_out1;
 const char * ssid = "M5StackFIRE";
 const char * password = "lets5ev9";
 
-
 //IP address to send UDP data to:
 // either use the ip address of the server or 
 // a network broadcast address
-const char * udpAddress = "192.168.4.255";
-const int udpPort = 80;
+//const char * udpAddress = "192.168.4.255";
+//const int udpPort = 80;
+const char * tcpAddress = "192.168.4.2";
+const int tcpPort = 80;
 
-WiFiUDP UDP;
+//WiFiUDP UDP;
 
-#define BUFLEN 64
-char WiFibuf[BUFLEN];
+//#define BUFLEN 64
+//char WiFibuf[BUFLEN];
+
+class WiFiHardware {
+  public:
+    WiFiClient client;
+    
+    WiFiHardware() {};
+    void init() {
+      this->client.connect(tcpAddress, tcpPort);    
+    }
+    
+    int read() {
+      if (this->client.connected()) {
+        return this->client.read();
+      } else {
+        this->client.connect(tcpAddress, tcpPort);
+      }
+      return -1;    
+    }
+    
+    void write(uint8_t* data, int length) {
+      for (int i = 0; i < length; i++){
+        Serial.print(data[i]);
+        this->client.write(data[i]);
+      }
+    }
+    unsigned long time() {return millis();}
+};
+ros::NodeHandle_<WiFiHardware, 15, 15, 4096, 4096> nh;
+
+
+
+void listenerCb(const std_msgs::String& str) {
+  M5.Lcd.setCursor(0, 60);
+  M5.Lcd.println(str.data);
+}
+ros::Subscriber<std_msgs::String> listener_sub("listener", &listenerCb);
+
+
+void messageCb(const geometry_msgs::Twist& twist) {
+  float linear_x = twist.linear.x;
+  float angle_z = twist.angular.z;
+
+  setMotor( (int16_t)(linear_x + angle_z),
+            (int16_t)(linear_x - angle_z));
+}
+ros::Subscriber<geometry_msgs::Twist> cmd_vel_sub("cmd_vel", &messageCb);
+
+//geometry_msgs::TransformStamped t;
+//tf::TransformBroadcaster broadcaster;
+
+std_msgs::String str_msg;
+ros::Publisher chatter("chatter", &str_msg);
 
 void setup() {
   // Power ON Stabilizing...
@@ -101,11 +161,18 @@ void setup() {
   M5.Lcd.print("AP IP address: ");
   M5.Lcd.println(myIP);
 
-  //WiFi.config(myIP, WiFi.gatewayIP(), WiFi.subnetMask());
-  UDP.begin(80);
+  nh.initNode();
+  nh.subscribe(listener_sub);
+  nh.advertise(chatter);
+  nh.subscribe(cmd_vel_sub);
+  
+  //broadcaster.init((ros::NodeHandle)nh);
 
-  Serial.println("UDP started");
-  M5.Lcd.println("UDP started");
+  //WiFi.config(myIP, WiFi.gatewayIP(), WiFi.subnetMask());
+  //UDP.begin(80);
+
+  //Serial.println("UDP started");
+  //M5.Lcd.println("UDP started");
 
 }
 
@@ -120,35 +187,51 @@ void loop() {
     M5.Lcd.printf("Output PWM0: %+4d     PWM1: %+4d    \r\n", 
                 pwm_out0, pwm_out1);
   }
-
-  if (UDP.parsePacket() > 0) {
-    UDP.read(WiFibuf, BUFLEN);
-    M5.Lcd.print(WiFibuf);
-    //UDP.flush();
-  }
-
-  //for debug
-  {
-    //Send a packet
-    UDP.beginPacket(udpAddress,udpPort);
-    //udp.printf("Seconds since boot: %u", millis()/1000);
-
-    UDP.write(AccX);//UDP.print(",");
-    UDP.write(AccY);//UDP.print(",");
-    UDP.write(AccZ);//UDP.print(",");
-    UDP.write(GyroX);//UDP.print(",");
-    UDP.write(GyroY);//UDP.print(",");
-    UDP.write(GyroZ);//UDP.print(",");
-    UDP.write(Temp);//UDP.print(",");
-    UDP.write(speed_input0);//UDP.print(",");
-    UDP.write(speed_input1);
-    
-    UDP.endPacket();
-  }
+//
+//  if (UDP.parsePacket() > 0) {
+//    UDP.read(WiFibuf, BUFLEN);
+//    M5.Lcd.print(WiFibuf);
+//    //UDP.flush();
+//  }
+//
+//  //for debug
+//  {
+//    //Send a packet
+//    UDP.beginPacket(udpAddress,udpPort);
+//    //udp.printf("Seconds since boot: %u", millis()/1000);
+//
+//    UDP.write(AccX);//UDP.print(",");
+//    UDP.write(AccY);//UDP.print(",");
+//    UDP.write(AccZ);//UDP.print(",");
+//    UDP.write(GyroX);//UDP.print(",");
+//    UDP.write(GyroY);//UDP.print(",");
+//    UDP.write(GyroZ);//UDP.print(",");
+//    UDP.write(Temp);//UDP.print(",");
+//    UDP.write(speed_input0);//UDP.print(",");
+//    UDP.write(speed_input1);
+//    
+//    UDP.endPacket();
+//  }
 
   readIMU();
   readEncoder();
-  
+
+//  // tf odom->base_link
+//  t.header.frame_id = "odom";
+//  t.child_frame_id = "base_link";
+//  
+//  t.transform.translation.x = speed_input0;
+//  t.transform.translation.y = speed_input1;
+//  
+//  t.transform.rotation = tf::createQuaternionFromYaw(GyroZ);
+//  t.header.stamp = nh.now();
+//  
+//  broadcaster.sendTransform(t);
+  str_msg.data = "hello";
+  chatter.publish( &str_msg );
+  delay(500);
+  // 
+  nh.spinOnce();
   // M5 Loop
   M5.update();
 }
