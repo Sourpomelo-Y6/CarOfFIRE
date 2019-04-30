@@ -4,13 +4,6 @@
  * Reading encoder and writting the motor via I2C
  ********************************************************/
 
-//references
-//M5Bala
-//https://github.com/m5stack/M5Bala
-//
-//MPU6050 Sample
-//https://ameblo.jp/ruru12245/entry-12404525191.html
-
 #include <M5Stack.h>
 
 #include <ros.h>
@@ -19,6 +12,14 @@
 #include <tf/transform_broadcaster.h>
 #include <geometry_msgs/Twist.h>
 #include <std_msgs/String.h>
+#include <sensor_msgs/LaserScan.h>
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "esp_system.h"
+#include "esp_spi_flash.h"
+#include "ydlidarTask.h"
+#include "esp_log.h"
 
 #include <Wire.h>
 #include <WiFi.h>
@@ -60,51 +61,53 @@ const char * password = "lets5ev9";
 // a network broadcast address
 //const char * udpAddress = "192.168.4.255";
 //const int udpPort = 80;
-const char * tcpAddress = "192.168.4.2";
-const int tcpPort = 80;
+//const char * tcpAddress = "192.168.4.2";
+//const int tcpPort = 80;
 
-//WiFiUDP UDP;
+//WiFiUDP UDP;M5Stack使ってみた　その６「加速度＆ジャイロセンサ」（MPU6050）※10月30日追記
 
 //#define BUFLEN 64
 //char WiFibuf[BUFLEN];
 
-class WiFiHardware {
-  public:
-    WiFiClient client;
-    
-    WiFiHardware() {};
-    void init() {
-      this->client.connect(tcpAddress, tcpPort);    
-    }
-    
-    int read() {
-      if (this->client.connected()) {
-        return this->client.read();
-      } else {
-        this->client.connect(tcpAddress, tcpPort);
-      }
-      return -1;    
-    }
-    
-    void write(uint8_t* data, int length) {
-      for (int i = 0; i < length; i++){
-        Serial.print(data[i]);
-        this->client.write(data[i]);
-      }
-    }
-    unsigned long time() {return millis();}
-};
-ros::NodeHandle_<WiFiHardware, 15, 15, 4096, 4096> nh;
+//class WiFiHardware {
+//  public:
+//    WiFiClient client;
+//    
+//    WiFiHardware() {};
+//    void init() {
+//      this->client.connect(tcpAddress, tcpPort);    
+//    }
+//    
+//    int read() {
+//      if (this->client.connected()) {
+//        return this->client.read();
+//      } else {
+//        this->client.connect(tcpAddress, tcpPort);
+//      }
+//      return -1;    
+//    }
+//    
+//    void write(uint8_t* data, int length) {
+//      for (int i = 0; i < length; i++){
+//        Serial.print(data[i]);
+//        this->client.write(data[i]);
+//      }
+//    }
+//    unsigned long time() {return millis();}
+//};
+
+//typedef ros::NodeHandle_<WiFiHardware, 15, 15, 4096, 4096> NodeHandle;
+ros::NodeHandle nh;
 
 
-
+// Listener (For Debug)
 void listenerCb(const std_msgs::String& str) {
   M5.Lcd.setCursor(0, 60);
   M5.Lcd.println(str.data);
 }
 ros::Subscriber<std_msgs::String> listener_sub("listener", &listenerCb);
 
-
+// Command Velocity
 void messageCb(const geometry_msgs::Twist& twist) {
   float linear_x = twist.linear.x;
   float angle_z = twist.angular.z;
@@ -114,11 +117,24 @@ void messageCb(const geometry_msgs::Twist& twist) {
 }
 ros::Subscriber<geometry_msgs::Twist> cmd_vel_sub("cmd_vel", &messageCb);
 
-//geometry_msgs::TransformStamped t;
-//tf::TransformBroadcaster broadcaster;
+// TF (For Odom)
+geometry_msgs::TransformStamped t;
+tf::TransformBroadcaster broadcaster;
 
+// Chatter (For Debug)
 std_msgs::String str_msg;
 ros::Publisher chatter("chatter", &str_msg);
+
+// LaserScan
+sensor_msgs::LaserScan lidar_msg;
+ros::Publisher lidar_pub("laser_scan", &lidar_msg);
+
+float dist[360];
+uint8_t flag=0;
+
+void onRecv(void *dummy){
+    flag=1;
+}
 
 void setup() {
   // Power ON Stabilizing...
@@ -165,8 +181,29 @@ void setup() {
   nh.subscribe(listener_sub);
   nh.advertise(chatter);
   nh.subscribe(cmd_vel_sub);
-  
-  //broadcaster.init((ros::NodeHandle)nh);
+  nh.advertise(lidar_pub);  
+
+  broadcaster.init(nh);
+
+  t.header.frame_id = "odom";
+  t.child_frame_id = "base_link";
+
+  // Set LaserScan Definition
+  lidar_msg.header.frame_id = "lidar";
+  lidar_msg.angle_min = 0.0;               // start angle of the scan [rad]
+  lidar_msg.angle_max = 3.14*2;            // end angle of the scan [rad]
+  lidar_msg.angle_increment = 3.14*2/360;  // angular distance between measurements [rad]
+  lidar_msg.range_min = 0.3;               // minimum range value [m]
+  lidar_msg.range_max = 50.0;                // maximum range value [m]
+
+  lidar_msg.ranges_length = 360;
+  lidar_msg.intensities_length = 0;
+
+  ydlidar_begin(UART_NUM_2,17,16,onRecv,NULL);
+
+  M5.Lcd.println("Start command is sent");
+  while(!ydlidar_is_ready())vTaskDelay(1 / portTICK_PERIOD_MS);
+  M5.Lcd.println("First packet comes! start!");
 
   //WiFi.config(myIP, WiFi.gatewayIP(), WiFi.subnetMask());
   //UDP.begin(80);
@@ -175,6 +212,8 @@ void setup() {
   //M5.Lcd.println("UDP started");
 
 }
+
+unsigned int old_millis = 0;
 
 void loop() {
   // LCD display
@@ -213,23 +252,46 @@ void loop() {
 //    UDP.endPacket();
 //  }
 
+  static YDPacket data;
+    
+  ////////////////////////
+  //Get packet data exsample
+  ///////////////////////
+  for(int l=0;l<30;l++){
+      if(flag){
+          flag=0;
+          ydlidar_get(&data);
+          for(int i=0;i<data.lsn;i++){
+              int pos=(int)(ydpacket_angle(&data,i));
+              pos=(pos+360)%360;
+              dist[pos]=(ydpacket_len(&data,i))/1000.0;
+          }
+      }
+      vTaskDelay(10 / portTICK_PERIOD_MS);
+  }
+
+  if(millis() - old_millis > 1000){
+    lidar_msg.ranges = dist;
+    lidar_msg.header.stamp = nh.now();
+    lidar_pub.publish(&lidar_msg);
+    old_millis = millis(); 
+  }
+
   readIMU();
   readEncoder();
 
-//  // tf odom->base_link
-//  t.header.frame_id = "odom";
-//  t.child_frame_id = "base_link";
-//  
-//  t.transform.translation.x = speed_input0;
-//  t.transform.translation.y = speed_input1;
-//  
-//  t.transform.rotation = tf::createQuaternionFromYaw(GyroZ);
-//  t.header.stamp = nh.now();
-//  
-//  broadcaster.sendTransform(t);
+  // tf odom->base_link
+  
+  t.transform.translation.x = speed_input0;
+  t.transform.translation.y = speed_input1;
+  
+  t.transform.rotation = tf::createQuaternionFromYaw(GyroZ);
+  t.header.stamp = nh.now();
+  
+  broadcaster.sendTransform(t);
+
   str_msg.data = "hello";
   chatter.publish( &str_msg );
-  delay(500);
   // 
   nh.spinOnce();
   // M5 Loop
