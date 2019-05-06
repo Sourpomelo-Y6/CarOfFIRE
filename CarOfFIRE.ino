@@ -13,6 +13,7 @@
 #include <geometry_msgs/Twist.h>
 #include <std_msgs/String.h>
 #include <sensor_msgs/LaserScan.h>
+#include <nav_msgs/Odometry.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -43,12 +44,19 @@
 #define MOTOR_CTRL_ADDR     0x00
 #define ENCODER_ADDR        0x04
 
+#define WHEEL_RADIUS 0.044 * PI
+#define ENCODER_ROTATE_CNT 2800.0
+
 int16_t AccX, AccY, AccZ;
 int16_t Temp;
 int16_t GyroX, GyroY, GyroZ;
 
+float odom_pose[3]={0.0,0.0,0.0};
+float odom_vel[3]={0.0,0.0,0.0};
 int16_t speed_input0, speed_input1;
 int16_t pwm_out0, pwm_out1;
+
+int16_t speed_total_input0, speed_total_input1;
 
 // Set these to your desired credentials.
 //const char * ssid = "your-ssid";
@@ -117,8 +125,12 @@ void messageCb(const geometry_msgs::Twist& twist) {
 }
 ros::Subscriber<geometry_msgs::Twist> cmd_vel_sub("cmd_vel", &messageCb);
 
+// Odom
+nav_msgs::Odometry odom_msg;
+ros::Publisher odom_pub("odom", &odom_msg);
+
 // TF (For Odom)
-geometry_msgs::TransformStamped t;
+geometry_msgs::TransformStamped odom_tf;
 tf::TransformBroadcaster broadcaster;
 
 // Chatter (For Debug)
@@ -131,6 +143,8 @@ ros::Publisher lidar_pub("laser_scan", &lidar_msg);
 
 float dist[360];
 uint8_t flag=0;
+
+uint32_t prev_update_time;
 
 void onRecv(void *dummy){
     flag=1;
@@ -181,12 +195,13 @@ void setup() {
   nh.subscribe(listener_sub);
   nh.advertise(chatter);
   nh.subscribe(cmd_vel_sub);
-  nh.advertise(lidar_pub);  
+  nh.advertise(lidar_pub);
+  nh.advertise(odom_pub);  
 
   broadcaster.init(nh);
 
-  t.header.frame_id = "odom";
-  t.child_frame_id = "base_link";
+  odom_tf.header.frame_id = "odom";
+  odom_tf.child_frame_id = "base_link";
 
   // Set LaserScan Definition
   lidar_msg.header.frame_id = "lidar";
@@ -205,6 +220,10 @@ void setup() {
   while(!ydlidar_is_ready())vTaskDelay(1 / portTICK_PERIOD_MS);
   M5.Lcd.println("First packet comes! start!");
 
+  speed_total_input0=0;
+  speed_total_input1=0;
+  prev_update_time = millis();
+
   //WiFi.config(myIP, WiFi.gatewayIP(), WiFi.subnetMask());
   //UDP.begin(80);
 
@@ -213,16 +232,19 @@ void setup() {
 
 }
 
-unsigned int old_millis = 0;
+uint32_t scan_interval = 0;
 
 void loop() {
   // LCD display
   static uint32_t print_interval = millis() + 30;
+  
   if (millis() > print_interval) {
     print_interval = millis() + 100;
     M5.Lcd.setCursor(0, 40);
-    M5.Lcd.printf("Input  Encoer0: %+4d  Encoer1: %+4d    \r\n", 
+    M5.Lcd.printf("Input Encoer0: %+6d      \r\nInput Encoer1: %+6d      \r\n", 
                 speed_input0, speed_input1);
+    M5.Lcd.printf("Total Encoer0: %+6d      \r\nTotal Encoer1: %+6d      \r\n", 
+                speed_total_input0, speed_total_input1);
     M5.Lcd.printf("Output PWM0: %+4d     PWM1: %+4d    \r\n", 
                 pwm_out0, pwm_out1);
   }
@@ -270,29 +292,68 @@ void loop() {
       vTaskDelay(10 / portTICK_PERIOD_MS);
   }
 
-  if(millis() - old_millis > 1000){
+  if(millis() > scan_interval){
     lidar_msg.ranges = dist;
     lidar_msg.header.stamp = nh.now();
     lidar_pub.publish(&lidar_msg);
-    old_millis = millis(); 
+    scan_interval = millis() + 1000; 
   }
 
   readIMU();
   readEncoder();
 
-  // tf odom->base_link
-  
-  t.transform.translation.x = speed_input0;
-  t.transform.translation.y = speed_input1;
-  
-  t.transform.rotation = tf::createQuaternionFromYaw(GyroZ);
-  t.header.stamp = nh.now();
-  
-  broadcaster.sendTransform(t);
+  uint32_t time_now = millis();
+  uint32_t step_time = time_now - prev_update_time;
+  prev_update_time = time_now;
 
+  if(step_time > 0){
+    // tf odom->base_link
+    speed_total_input0 += speed_input0;
+    speed_total_input1 += speed_input1;
+  
+    double wheel_l = speed_input0;
+    double wheel_r = speed_input1;
+    double delta_r = WHEEL_RADIUS / ENCODER_ROTATE_CNT * (wheel_r + wheel_l) / 2.0;
+    double delta_theta = ((float)GyroY/131.0) * PI / 180.0;
+     
+    // compute odometric pose
+    odom_pose[0] += delta_r * cos(odom_pose[2] + (delta_theta / 2.0));
+    odom_pose[1] += delta_r * sin(odom_pose[2] + (delta_theta / 2.0));
+    odom_pose[2] += delta_theta;
+    //odom_pose[2] = fmod(odom_pose[2],2 * PI);
+    
+    odom_vel[0] = delta_r / (step_time * 0.001);
+    odom_vel[2] = delta_theta / (step_time * 0.001);
+  
+    //odom
+    odom_msg.header.stamp = nh.now();
+    odom_msg.header.frame_id = "odom";
+    odom_msg.child_frame_id  = "base_link";
+  
+    odom_msg.pose.pose.position.x = odom_pose[0];
+    odom_msg.pose.pose.position.y = odom_pose[1];
+    odom_msg.pose.pose.position.z = 0;
+    odom_msg.pose.pose.orientation = tf::createQuaternionFromYaw(odom_pose[2]);
+  
+    odom_msg.twist.twist.linear.x  = odom_vel[0];
+    odom_msg.twist.twist.angular.z = odom_vel[2];
+  
+    odom_pub.publish(&odom_msg);
+  
+    //tf
+    odom_tf.transform.translation.x = odom_pose[0];
+    odom_tf.transform.translation.y = odom_pose[1];
+    odom_tf.transform.translation.z = 0;
+    
+    odom_tf.transform.rotation = tf::createQuaternionFromYaw(odom_pose[2]);
+    odom_tf.header.stamp = nh.now();
+    
+    broadcaster.sendTransform(odom_tf);
+  }
   str_msg.data = "hello";
   chatter.publish( &str_msg );
-  // 
+  
+  // ROS Loop
   nh.spinOnce();
   // M5 Loop
   M5.update();
@@ -313,7 +374,8 @@ void setMotor(int16_t pwm0, int16_t pwm1) {
     return;
   pre_m0 = m0;
   pre_m1 = m1;
-
+  pwm_out0 = pre_m0;
+  pwm_out1 = pre_m1;
   // Send I2C
   Wire.beginTransmission(M5GO_WHEEL_ADDR);
   Wire.write(MOTOR_CTRL_ADDR); // Motor ctrl reg addr
@@ -342,13 +404,16 @@ void readEncoder() {
     ((uint8_t*)rx_buf)[3] = Wire.read();
     
     // filter
-    _speed_input0 *= 0.9;
-    _speed_input0 += 0.1 * rx_buf[0];
-    _speed_input1 *= 0.9;
-    _speed_input1 += 0.1 * rx_buf[1];
+    //_speed_input0 *= 0.9;
+    //_speed_input0 += 0.1 * rx_buf[0];
+    //_speed_input1 *= 0.9;
+    //_speed_input1 += 0.1 * rx_buf[1];
+
+    _speed_input0 = rx_buf[0];
+    _speed_input1 = rx_buf[1];
     
-    speed_input0 = constrain((int16_t)(-_speed_input0), -255, 255);
-    speed_input1 = constrain((int16_t)(_speed_input1), -255, 255);
+    speed_input0 = constrain((int16_t)(-_speed_input0), -255 * 16, 255 * 16);
+    speed_input1 = constrain((int16_t)(_speed_input1), -255 * 16, 255 * 16);
   }
 }
 
